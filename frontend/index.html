@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>AI Trading Engine</title>
+    <style>
+        body {
+            font-family: Arial;
+            max-width: 700px;
+            margin: 30px auto;
+            padding: 20px;
+        }
+        select, button {
+            padding: 12px;
+            font-size: 16px;
+            margin-top: 10px;
+            width: 100%;
+        }
+        #result {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f4f4f4;
+            border-radius: 5px;
+            white-space: pre-wrap;
+            font-family: monospace;
+        }
+        .badge {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 6px;
+            color: white;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+        .buy    { background: #0f9d58; }
+        .sell   { background: #d93025; }
+        .no     { background: #f9ab00; }
+
+        #loader {
+            display: none;
+            margin-top: 20px;
+            font-size: 18px;
+            color: #666;
+        }
+
+        .prob-bar {
+            height: 10px;
+            background: #ccc;
+            border-radius: 5px;
+            margin-top: 8px;
+            overflow: hidden;
+        }
+        .prob-fill-up {
+            height: 100%;
+            background: #0f9d58;
+        }
+        .prob-fill-down {
+            height: 100%;
+            background: #d93025;
+        }
+    </style>
+</head>
+<body>
+
+    <h2>AI Trading Prediction</h2>
+
+    <label>Asset:</label>
+    <select id="symbol">
+        <option value="NIFTY">NIFTY 50</option>
+        <option value="BANKNIFTY">BANKNIFTY</option>
+        <option value="CRUDEOIL">CRUDE OIL</option>
+        <option value="NATURALGAS">NATURAL GAS</option>
+    </select>
+
+    <label>Timeframe:</label>
+    <select id="timeframe">
+        <option value="1D">1 Day</option>
+        <option value="1H">1 Hour</option>
+        <option value="15m">15 Minutes</option>
+        <option value="5m">5 Minutes</option>
+    </select>
+
+    <button onclick="hitAPI()">Get AI Prediction</button>
+
+    <div id="loader">⏳ Processing… This may take a few seconds…</div>
+
+    <div id="result">Waiting for request...</div>
+
+    <script>
+        async function hitAPI() {
+            const symbol = document.getElementById('symbol').value;
+            const timeframe = document.getElementById('timeframe').value;
+
+            document.getElementById("loader").style.display = "block";
+            document.getElementById("result").innerText = "";
+
+            const body = {
+                ticker: symbol,
+                timeframe: timeframe,
+                price: null,
+                pattern: null,
+                message: "Frontend request"
+            };
+
+            try {
+                const res = await fetch("http://localhost:8000/tv-webhook", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify(body)
+                });
+
+                const data = await res.json();
+                document.getElementById("loader").style.display = "none";
+
+                let badgeClass = "no";
+                if (data.ai_signal === "BUY") badgeClass = "buy";
+                if (data.ai_signal === "SELL") badgeClass = "sell";
+
+                const up = (data.ai_prob_up * 100).toFixed(2);
+                const down = (data.ai_prob_down * 100).toFixed(2);
+
+                document.getElementById("result").innerHTML = `
+                    <span class="badge ${badgeClass}">${data.ai_signal}</span>
+                    <div><strong>Latest Price:</strong> ${data.latest_price}</div>
+                    <div><strong>Probability UP:</strong> ${up}%</div>
+                    <div class="prob-bar"><div class="prob-fill-up" style="width:${up}%"></div></div>
+                    <div><strong>Probability DOWN:</strong> ${down}%</div>
+                    <div class="prob-bar"><div class="prob-fill-down" style="width:${down}%"></div></div>
+                    <hr>
+                    <pre>${JSON.stringify(data, null, 2)}</pre>
+                `;
+
+            } catch (err) {
+                document.getElementById("loader").style.display = "none";
+                document.getElementById("result").innerText =
+                    "❌ Error connecting to AI engine: " + err;
+            }
+        }
+    </script>
+
+</body>
+</html>

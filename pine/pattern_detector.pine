@@ -1,0 +1,120 @@
+//@version=5
+indicator("AI Quant Pattern Detector", overlay=true, max_lines_count=500, max_labels_count=500)
+
+// -------------------------
+// Swing High/Low Detection
+// -------------------------
+left = input.int(3, "Left Bars")
+right = input.int(3, "Right Bars")
+
+isSwingHigh = ta.pivothigh(high, left, right)
+isSwingLow = ta.pivotlow(low, left, right)
+
+// Plot swings
+plotshape(isSwingHigh, title="Swing High", style=shape.triangledown, color=color.red, size=size.tiny)
+plotshape(isSwingLow, title="Swing Low", style=shape.triangleup, color=color.green, size=size.tiny)
+
+
+// -------------------------
+// DOUBLE TOP / BOTTOM
+// -------------------------
+doubleTopTolerance = input.float(0.005, "Double Top Tolerance")
+
+var line doubleTopLine = na
+
+if isSwingHigh
+    // Find previous pivot high
+    prevHigh = ta.valuewhen(isSwingHigh, high, 1)
+
+    if math.abs(high - prevHigh) / prevHigh <= doubleTopTolerance
+        label.new(bar_index, high, "Double Top", color=color.red, style=label.style_label_down)
+        doubleTopLine := line.new(bar_index[right], high, bar_index, high, extend=extend.right, color=color.red)
+
+if isSwingLow
+    prevLow = ta.valuewhen(isSwingLow, low, 1)
+    if math.abs(low - prevLow) / prevLow <= doubleTopTolerance
+        label.new(bar_index, low, "Double Bottom", color=color.green, style=label.style_label_up)
+        line.new(bar_index[right], low, bar_index, low, extend=extend.right, color=color.green)
+
+
+// -------------------------
+// TRIANGLE DETECTION (simple version)
+// -------------------------
+window = input.int(50, "Triangle Window")
+highestHigh = ta.highest(high, window)
+lowestLow = ta.lowest(low, window)
+
+upperTrend = ta.linreg(high, window, 0)
+lowerTrend = ta.linreg(low, window, 0)
+
+isTriangle = upperTrend < highestHigh and lowerTrend > lowestLow
+
+plot(isTriangle ? upperTrend : na, color=color.new(color.blue, 0))
+plot(isTriangle ? lowerTrend : na, color=color.new(color.blue, 0))
+
+if isTriangle
+    label.new(bar_index, high, "Triangle", color=color.blue, style=label.style_label_down)
+
+
+// -------------------------
+// HEAD & SHOULDERS (simple version)
+// -------------------------
+hs = isSwingHigh and ta.valuewhen(isSwingHigh, high, 1) < high and ta.valuewhen(isSwingHigh, high, 2) < ta.valuewhen(isSwingHigh, high, 1)
+
+if hs
+    label.new(bar_index, high, "H&S Top", color=color.orange, style=label.style_label_down)
+
+
+// -------------------------
+// FLAG / PENNANT DETECTION
+// -------------------------
+flagSlope = ta.linreg(close, 20, 0)
+flagSlope2 = ta.linreg(close, 20, 10)
+
+isFlag = math.abs(flagSlope - flagSlope2) < 0.1
+
+if isFlag
+    label.new(bar_index, close, "Flag", color=color.yellow, style=label.style_label_right)
+
+
+// -------------------------
+// BREAKOUT DETECTION
+// -------------------------
+breakoutUp = high > highestHigh
+breakoutDown = low < lowestLow
+
+plotshape(breakoutUp, title="Breakout Up", style=shape.triangleup, color=color.green, size=size.small)
+plotshape(breakoutDown, title="Breakout Down", style=shape.triangledown, color=color.red, size=size.small)
+
+
+// -------------------------
+// OUTPUT SIGNALS (for signals.pine)
+// -------------------------
+var string detected_pattern = ""
+
+if isSwingHigh
+    detected_pattern := "SwingHigh"
+
+if isSwingLow
+    detected_pattern := "SwingLow"
+
+if isTriangle
+    detected_pattern := "Triangle"
+
+if breakoutUp
+    detected_pattern := "BreakoutUp"
+
+if breakoutDown
+    detected_pattern := "BreakoutDown"
+
+//
+// EXPORT pattern type as a plot for signals.pine
+//
+pattern_code =
+     detected_pattern == "Triangle" ? 3 :
+     detected_pattern == "BreakoutUp" ? 2 :
+     detected_pattern == "BreakoutDown" ? -2 :
+     detected_pattern == "SwingHigh" ? 1 :
+     detected_pattern == "SwingLow" ? -1 : 0
+
+plot(pattern_code, title="Pattern Code", display=display.none)
