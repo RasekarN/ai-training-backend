@@ -1,16 +1,16 @@
 import os
+import time
 import pandas as pd
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import time
 
 from src.data_loader.yahoo_loader import YahooDataLoader
 from src.models.train_model import ModelTrainer
 
 app = FastAPI()
 
-# CORS for frontend
+# Allow all CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -18,17 +18,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Cache storage
+CACHE = {}
+CACHE_TTL = 10  # seconds
 
-# ============================================
-#  Payload
-# ============================================
+
 class SignalRequest(BaseModel):
     symbol: str | None = None
     ticker: str | None = None
     timeframe: str
 
 
-# MAP INDEX → YAHOO SYMBOLS
 YAHOO_MAP = {
     "NIFTY": "^NSEI",
     "BANKNIFTY": "^NSEBANK",
@@ -36,7 +36,6 @@ YAHOO_MAP = {
     "NG": "NG=F",
 }
 
-# MAP FRONTEND TIMEFRAME → YAHOO INTERVAL + PERIOD
 TIMEFRAME_MAP = {
     "1D": ("1d", "5y"),
     "1H": ("60m", "730d"),
@@ -47,131 +46,89 @@ TIMEFRAME_MAP = {
 loader = YahooDataLoader()
 
 
-# ======================================================================
-#         **RENDER-FIX**: RESILIENT DATA FETCHER (NO EMPTY DF EVER)
-# ======================================================================
-def safe_fetch_yahoo(symbol, interval, period, attempts=4):
-    """
-    Render often blocks Yahoo requests. Retry several times.
-    """
-
-    for i in range(attempts):
-        try:
-            print(f"[Yahoo Fetch Attempt {i+1}/{attempts}] {symbol} interval={interval}")
-            df = loader.fetch(symbol, interval=interval, period=period)
-
-            if df is not None and len(df) > 50:
-                return df
-
-        except Exception as e:
-            print(f"Fetch error: {e}")
-
-        time.sleep(1.2)   # Avoid Yahoo rate limits
-
-    print("⚠ Yahoo failed — final attempt using fallback interval...")
-
-    # FINAL FALLBACK (Guaranteed)
-    try:
-        fallback_df = loader.fetch(symbol, interval="1d", period="1y")
-        if fallback_df is not None and len(fallback_df) > 50:
-            return fallback_df
-    except:
-        pass
-
+def get_cached_response(key):
+    """Return cached response if still valid."""
+    if key in CACHE:
+        ts, data = CACHE[key]
+        if time.time() - ts <= CACHE_TTL:
+            print(f"[CACHE HIT] {key}")
+            return data
     return None
 
 
-# ============================================
-#            Main Prediction Route
-# ============================================
+def set_cache(key, data):
+    CACHE[key] = (time.time(), data)
+
+
 @app.post("/tv-webhook")
 async def get_signal(req: SignalRequest):
 
-    print("\n========== NEW SIGNAL REQUEST ==========")
-    print(f"Raw Payload: {req}")
-
-    # --------------------------------------------
-    # 1) Resolve symbol
-    # --------------------------------------------
-    symbol = req.symbol or req.ticker
-    if symbol is None:
-        return {"error": "Missing field: symbol or ticker is required"}
-
-    symbol = symbol.upper()
-    print(f"Resolved Symbol = {symbol}")
-
+    # Resolve symbol
+    symbol = (req.symbol or req.ticker).upper()
     if symbol not in YAHOO_MAP:
-        return {"error": f"Unknown symbol {symbol}. Allowed: {list(YAHOO_MAP.keys())}"}
+        return {"error": f"Unknown symbol {symbol}"}
 
     yahoo_symbol = YAHOO_MAP[symbol]
 
-    # --------------------------------------------
-    # 2) Validate timeframe
-    # --------------------------------------------
+    # Resolve timeframe
     if req.timeframe not in TIMEFRAME_MAP:
-        return {"error": f"Invalid timeframe {req.timeframe}"}
+        return {"error": f"Invalid timeframe: {req.timeframe}"}
 
     interval, period = TIMEFRAME_MAP[req.timeframe]
 
-    print(f"Yahoo Symbol → {yahoo_symbol}")
-    print(f"Interval → {interval}, Period → {period}")
+    # Cache Key
+    cache_key = f"{symbol}_{interval}"
 
-    # --------------------------------------------
-    # 3) Fetch data (Render-safe)
-    # --------------------------------------------
-    df = safe_fetch_yahoo(yahoo_symbol, interval, period)
+    # Try Cache First
+    cached = get_cached_response(cache_key)
+    if cached:
+        return cached
 
-    if df is None or len(df) < 50:
-        print("❌ FATAL: No data even after retries")
-        return {"error": f"Yahoo returned insufficient data for {symbol}. Try later."}
+    # ============================
+    #     EXPONENTIAL BACKOFF
+    # ============================
+    df = None
+    for attempt in range(4):
+        try:
+            print(f"[Yahoo Fetch Attempt {attempt+1}/4] {yahoo_symbol}")
+            df = loader.fetch(yahoo_symbol, interval=interval, period=period)
+            if df is not None and len(df) > 100:
+                break
+        except Exception as e:
+            print(f"Yahoo error: {e}")
 
-    print(f"Data Loaded: {len(df)} rows")
+        # Exponential delay
+        time.sleep(0.5 * (2 ** attempt))
 
-    # Clean any NaN for safety
-    df = df.dropna().reset_index(drop=True)
+    if df is None or len(df) < 100:
+        # If Yahoo failed, fallback to cached data
+        cached = get_cached_response(cache_key)
+        if cached:
+            print("[FALLBACK] Using cached data due to Yahoo failure.")
+            return cached
+        return {"error": f"Yahoo failed for {symbol}, no cache available"}
 
-    # --------------------------------------------
-    # 4) Train model
-    # --------------------------------------------
+    # Train & Predict
     trainer = ModelTrainer()
+    model = trainer.train(df)
+    signal, p_up, p_down, latest_price = trainer.predict_latest_from_df(model, df)
 
-    try:
-        model = trainer.train(df)
-    except Exception as e:
-        print(f"Training Error: {e}")
-        return {"error": f"Training failed: {str(e)}"}
-
-    print("Training COMPLETE.")
-
-    # --------------------------------------------
-    # 5) Predict
-    # --------------------------------------------
-    try:
-        signal, p_up, p_down, latest_price = trainer.predict_latest_from_df(model, df)
-    except Exception as e:
-        print(f"Prediction Error: {e}")
-        return {"error": f"Prediction failed: {str(e)}"}
-
-    print(f"Signal = {signal} | UP={p_up:.4f} DOWN={p_down:.4f}")
-    print("==========================================\n")
-
-    return {
+    # Final Response
+    response = {
         "input_symbol": symbol,
         "yahoo_symbol": yahoo_symbol,
         "timeframe": req.timeframe,
         "ai_signal": signal,
-        "ai_prob_up": float(p_up),
-        "ai_prob_down": float(p_down),
-        "latest_price": float(latest_price),
-        "ohlc": df.tail(200).to_dict(orient="records")
+        "ai_prob_up": p_up,
+        "ai_prob_down": p_down,
+        "latest_price": latest_price,
+        "ohlc": df.tail(200).to_dict(orient="records"),
     }
+
+    set_cache(cache_key, response)
+    return response
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(
-        "src.server.webhook_server:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True
-    )
+    uvicorn.run("src.server.webhook_server:app", host="0.0.0.0", port=8000, reload=True)
